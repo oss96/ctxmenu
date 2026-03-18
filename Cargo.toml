@@ -1,0 +1,17 @@
+[package]
+name = "ctxmenu"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+clap = { version = "4", features = ["derive"] }
+winreg = "0.55"
+tabled = "0.17"
+anyhow = "1"
+iced = { version = "0.13", features = ["tokio"] }
+tokio = { version = "1", features = ["rt"] }
+
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.52", features = [
+    "Win32_System_Console",
+] }
