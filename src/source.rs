@@ -165,7 +165,7 @@ fn resolve_clsid_to_path(clsid: &str) -> Option<String> {
 }
 
 /// Read the human-readable display name from `HKCR\CLSID\{clsid}` default value.
-fn clsid_display_name(clsid: &str) -> Option<String> {
+pub fn clsid_display_name(clsid: &str) -> Option<String> {
     let hkcr = RegKey::predef(HKEY_CLASSES_ROOT);
     let path = format!(r"CLSID\{}", clsid);
     let key = hkcr.open_subkey_with_flags(&path, KEY_READ).ok()?;
@@ -315,4 +315,80 @@ fn filename_stem(path: &str) -> String {
         .and_then(|s| s.to_str())
         .unwrap_or("Unknown")
         .to_string()
+}
+
+/// Resolve a display name from a registry value.
+/// If the string starts with `@`, it's a MUI indirect string resolved via
+/// `SHLoadIndirectString`. Otherwise the string is returned as-is with
+/// Windows menu ampersand accelerators stripped (e.g. "E&dit" → "Edit").
+pub fn resolve_display_name(raw: &str) -> Option<String> {
+    let trimmed = raw.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+    if trimmed.starts_with('@') {
+        return resolve_mui_string(trimmed).map(|s| {
+            let clean = strip_menu_ampersand(&s);
+            clean.trim().to_string()
+        }).filter(|s| !s.is_empty());
+    }
+    // Strip menu accelerator ampersands
+    let clean: String = strip_menu_ampersand(trimmed);
+    let clean = clean.trim();
+    if clean.is_empty() {
+        None
+    } else {
+        Some(clean.to_string())
+    }
+}
+
+/// Strip single `&` accelerator markers from menu text, preserving `&&` as literal `&`.
+fn strip_menu_ampersand(s: &str) -> String {
+    let mut result = String::with_capacity(s.len());
+    let mut chars = s.chars().peekable();
+    while let Some(c) = chars.next() {
+        if c == '&' {
+            if chars.peek() == Some(&'&') {
+                result.push('&');
+                chars.next();
+            }
+            // single & is stripped (accelerator marker)
+        } else {
+            result.push(c);
+        }
+    }
+    result
+}
+
+/// Resolve a `@dll,-resourceID` or `@{PackageFamilyName?resource}` MUI string
+/// using the Windows `SHLoadIndirectString` API.
+fn resolve_mui_string(mui: &str) -> Option<String> {
+    use windows_sys::Win32::UI::Shell::SHLoadIndirectString;
+
+    let wide: Vec<u16> = mui.encode_utf16().chain(std::iter::once(0)).collect();
+    let mut buffer = vec![0u16; 512];
+
+    let hr = unsafe {
+        SHLoadIndirectString(
+            wide.as_ptr(),
+            buffer.as_mut_ptr(),
+            buffer.len() as u32,
+            std::ptr::null_mut(),
+        )
+    };
+
+    if hr == 0 {
+        // S_OK
+        let len = buffer.iter().position(|&c| c == 0).unwrap_or(buffer.len());
+        let s = String::from_utf16_lossy(&buffer[..len])
+            .trim()
+            .to_string();
+        if s.is_empty() {
+            None
+        } else {
+            Some(s)
+        }
+    } else {
+        None
+    }
 }

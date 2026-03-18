@@ -150,6 +150,59 @@ const SCAN_TARGETS: &[fn() -> ScanTarget] = &[
         entry_type: EntryType::ShellEx,
         location: Location::Background,
     },
+    // SystemFileAssociations\image  (all image files by perceived type)
+    || ScanTarget {
+        path: r"SystemFileAssociations\image\shell",
+        entry_type: EntryType::Shell,
+        location: Location::Files,
+    },
+    || ScanTarget {
+        path: r"SystemFileAssociations\image\shellex\ContextMenuHandlers",
+        entry_type: EntryType::ShellEx,
+        location: Location::Files,
+    },
+    // SystemFileAssociations\audio
+    || ScanTarget {
+        path: r"SystemFileAssociations\audio\shell",
+        entry_type: EntryType::Shell,
+        location: Location::Files,
+    },
+    || ScanTarget {
+        path: r"SystemFileAssociations\audio\shellex\ContextMenuHandlers",
+        entry_type: EntryType::ShellEx,
+        location: Location::Files,
+    },
+    // SystemFileAssociations\video
+    || ScanTarget {
+        path: r"SystemFileAssociations\video\shell",
+        entry_type: EntryType::Shell,
+        location: Location::Files,
+    },
+    || ScanTarget {
+        path: r"SystemFileAssociations\video\shellex\ContextMenuHandlers",
+        entry_type: EntryType::ShellEx,
+        location: Location::Files,
+    },
+];
+
+/// Well-known ShellEx handler key names → actual menu display text.
+/// ShellEx handlers generate their display names at runtime via COM,
+/// so we maintain this table for common Windows handlers.
+const SHELLEX_DISPLAY_NAMES: &[(&str, &str)] = &[
+    ("EPP", "Scan with Microsoft Defender..."),
+    ("Sharing", "Give access to"),
+    ("ModernSharing", "Share"),
+    ("CopyAsPathMenu", "Copy as path"),
+    ("SendTo", "Send to"),
+    ("PintoStartScreen", "Pin to Start"),
+    ("PlayTo", "Cast to Device"),
+    ("ShellImagePreview", "Image Preview"),
+];
+
+/// Well-known ShellEx CLSIDs → actual menu display text.
+/// For entries whose registry key name IS a CLSID.
+const SHELLEX_CLSID_NAMES: &[(&str, &str)] = &[
+    ("{596AB062-B4D2-4215-9F74-E9109B0A8153}", "Restore previous versions"),
 ];
 
 // Windows 11 modern context menu entries (IExplorerCommand / PackagedCom).
@@ -163,6 +216,7 @@ const MODERN_ENTRIES: &[(&str, &str, Location)] = &[
     ("Open in Terminal Preview", "{02DB545A-3E20-46DE-83A5-1329B1E88B6B}", Location::Background),
     ("Copy as path", "{f3d06e7c-1e45-4a26-847e-f9fcdee59be0}", Location::Files),
     ("Ask Copilot", "{CB3B0003-8088-4EDE-8769-8B354AB2FF8C}", Location::Files),
+    ("Edit with Photos", "{7A53B94A-4E6E-4826-B48E-535020B264E5}", Location::Files),
     ("Photos", "{CD349BB6-A2BC-47ED-874F-7185ABA53BD4}", Location::Files),
     ("Photos (Share)", "{BFE0E2A4-C70C-4AD7-AC3D-10D1ECEBB5B4}", Location::Files),
 ];
@@ -207,6 +261,140 @@ fn scan_modern_entries(filter: Option<&Location>, entries: &mut Vec<MenuEntry>) 
     }
 }
 
+/// Dynamically discover modern context menu entries from PackagedCom registrations.
+/// This catches third-party IExplorerCommand handlers (e.g. "Open with Zed") that
+/// are not in the hardcoded MODERN_ENTRIES list.
+fn scan_dynamic_modern_entries(
+    filter: Option<&Location>,
+    entries: &mut Vec<MenuEntry>,
+    known_clsids: &HashSet<String>,
+) {
+    let hkcr = RegKey::predef(HKEY_CLASSES_ROOT);
+
+    let packages_key = match hkcr.open_subkey_with_flags(r"PackagedCom\Package", KEY_READ) {
+        Ok(key) => key,
+        Err(_) => return,
+    };
+
+    for package_name in packages_key.enum_keys().filter_map(|k| k.ok()) {
+        let class_path = format!(r"PackagedCom\Package\{}\Class", package_name);
+        let class_key = match hkcr.open_subkey_with_flags(&class_path, KEY_READ) {
+            Ok(key) => key,
+            Err(_) => continue,
+        };
+
+        for clsid in class_key.enum_keys().filter_map(|k| k.ok()) {
+            if known_clsids.contains(&clsid.to_lowercase()) {
+                continue;
+            }
+
+            // Skip OLE document/automation classes (they have ProgID or TypeLib subkeys)
+            let clsid_reg_path = format!(r"CLSID\{}", clsid);
+            if let Ok(clsid_key) = hkcr.open_subkey_with_flags(&clsid_reg_path, KEY_READ)
+            {
+                if clsid_key
+                    .open_subkey_with_flags("ProgID", KEY_READ)
+                    .is_ok()
+                    || clsid_key
+                        .open_subkey_with_flags("TypeLib", KEY_READ)
+                        .is_ok()
+                    || clsid_key
+                        .open_subkey_with_flags("Insertable", KEY_READ)
+                        .is_ok()
+                {
+                    continue;
+                }
+            }
+
+            // Only include CLSIDs with a human-readable display name
+            let display_name = match source::clsid_display_name(&clsid) {
+                Some(name) => name,
+                None => continue,
+            };
+
+            let location = Location::Files;
+            if let Some(f) = filter {
+                if location != *f {
+                    continue;
+                }
+            }
+
+            let blocked = is_modern_blocked(&clsid);
+            let source_name = derive_source_from_package(&package_name);
+
+            entries.push(MenuEntry {
+                name: display_name,
+                registry_path: format!("blocked:{clsid}"),
+                entry_type: EntryType::Modern,
+                location,
+                status: if blocked {
+                    Status::Disabled
+                } else {
+                    Status::Enabled
+                },
+                command: Some(clsid.clone()),
+                source: source_name,
+            });
+        }
+    }
+}
+
+/// Extract a readable app name from a package full name.
+/// e.g. "ZedIndustries.Zed_1.2.3_x64__hash" → "Zed"
+fn derive_source_from_package(package_name: &str) -> String {
+    let family = package_name.split('_').next().unwrap_or(package_name);
+    family.rsplit('.').next().unwrap_or(family).to_string()
+}
+
+/// Try to resolve a human-readable display name for a context menu entry
+/// by reading MUIVerb, the default value, or falling back to the key name.
+fn resolve_entry_display_name(subkey: &RegKey, entry_type: &EntryType, key_name: &str) -> String {
+    match entry_type {
+        EntryType::Shell => {
+            // 1. Try MUIVerb (explicit display name, may be a MUI string)
+            if let Ok(mui_verb) = subkey.get_value::<String, _>("MUIVerb") {
+                if let Some(resolved) = source::resolve_display_name(&mui_verb) {
+                    return resolved;
+                }
+            }
+            // 2. Try the default value of the verb key itself
+            if let Ok(default_val) = subkey.get_value::<String, _>("") {
+                let trimmed = default_val.trim().to_string();
+                if !trimmed.is_empty() {
+                    if let Some(resolved) = source::resolve_display_name(&trimmed) {
+                        return resolved;
+                    }
+                }
+            }
+            // 3. Fallback to the registry key name
+            key_name.to_string()
+        }
+        EntryType::ShellEx => {
+            // 1. Check hardcoded display name table
+            if let Some(&(_, display)) = SHELLEX_DISPLAY_NAMES
+                .iter()
+                .find(|&&(name, _)| name.eq_ignore_ascii_case(key_name))
+            {
+                return display.to_string();
+            }
+            // 2. For CLSID key names, check CLSID tables then registry
+            if key_name.starts_with('{') {
+                if let Some(&(_, display)) = SHELLEX_CLSID_NAMES
+                    .iter()
+                    .find(|&&(clsid, _)| clsid.eq_ignore_ascii_case(key_name))
+                {
+                    return display.to_string();
+                }
+                if let Some(display) = source::clsid_display_name(key_name) {
+                    return display;
+                }
+            }
+            key_name.to_string()
+        }
+        EntryType::Modern => key_name.to_string(),
+    }
+}
+
 /// Scan ProgID and file-extension-specific context menu entries.
 /// These capture entries like "Edit in Notepad" (under txtfile\shell\edit)
 /// or app-specific entries registered under their ProgID.
@@ -225,13 +413,15 @@ fn scan_progid_entries(
 
     let hkcr = RegKey::predef(HKEY_CLASSES_ROOT);
 
-    // Collect ProgIDs from file extensions
+    // Collect ProgIDs and file extensions from HKCR
     let mut progids: HashSet<String> = HashSet::new();
+    let mut extensions: Vec<String> = Vec::new();
     if let Ok(hkcr_key) = hkcr.open_subkey_with_flags("", KEY_READ) {
         for ext_name in hkcr_key.enum_keys().filter_map(|k| k.ok()) {
             if !ext_name.starts_with('.') {
                 continue;
             }
+            extensions.push(ext_name.clone());
             // Read the default value to get the ProgID
             if let Ok(ext_key) = hkcr.open_subkey_with_flags(&ext_name, KEY_READ) {
                 if let Ok(progid) = ext_key.get_value::<String, _>("") {
@@ -251,13 +441,19 @@ fn scan_progid_entries(
         }
     }
 
-    // Scan each ProgID's shell and shellex\ContextMenuHandlers
-    for progid in &progids {
+    // Scan ProgIDs and SystemFileAssociations\.<ext> paths
+    // Combine both into a single set of paths to scan
+    let mut scan_roots: Vec<String> = progids.into_iter().collect();
+    for ext in &extensions {
+        scan_roots.push(format!("SystemFileAssociations\\{ext}"));
+    }
+
+    for root in &scan_roots {
         for (suffix, entry_type) in [
             ("shell", EntryType::Shell),
             ("shellex\\ContextMenuHandlers", EntryType::ShellEx),
         ] {
-            let path = format!("{}\\{}", progid, suffix);
+            let path = format!("{}\\{}", root, suffix);
             let parent = match hkcr.open_subkey_with_flags(&path, KEY_READ) {
                 Ok(key) => key,
                 Err(_) => continue,
@@ -302,8 +498,12 @@ fn scan_progid_entries(
                 );
 
                 seen.insert(dedup_key);
+
+                let display_name =
+                    resolve_entry_display_name(&subkey, &entry_type, &name);
+
                 entries.push(MenuEntry {
-                    name,
+                    name: display_name,
                     registry_path,
                     entry_type: entry_type.clone(),
                     location: Location::Files,
@@ -376,8 +576,11 @@ pub fn scan_entries(filter: Option<&Location>) -> Result<Vec<MenuEntry>> {
             let dedup_key = format!("{}:{}", name.to_lowercase(), target.entry_type);
             seen.insert(dedup_key);
 
+            let display_name =
+                resolve_entry_display_name(&subkey, &target.entry_type, &name);
+
             entries.push(MenuEntry {
-                name,
+                name: display_name,
                 registry_path,
                 entry_type: target.entry_type.clone(),
                 location: target.location.clone(),
@@ -395,80 +598,72 @@ pub fn scan_entries(filter: Option<&Location>) -> Result<Vec<MenuEntry>> {
     // Scan ProgID and file-extension-specific entries
     scan_progid_entries(filter, &mut entries, &mut seen, &mut source_cache);
 
-    // Scan Windows 11 modern context menu entries
+    // Scan Windows 11 modern context menu entries (hardcoded well-known)
     scan_modern_entries(filter, &mut entries);
+
+    // Dynamically discover additional modern entries from PackagedCom
+    let mut known_clsids: HashSet<String> = MODERN_ENTRIES
+        .iter()
+        .map(|(_, clsid, _)| clsid.to_lowercase())
+        .collect();
+    // Also exclude CLSIDs already captured as ShellEx entries
+    for entry in &entries {
+        if let Some(ref cmd) = entry.command {
+            let cmd_trimmed = cmd.trim();
+            if cmd_trimmed.starts_with('{') {
+                known_clsids.insert(cmd_trimmed.to_lowercase());
+            }
+        }
+    }
+    scan_dynamic_modern_entries(filter, &mut entries, &known_clsids);
 
     entries.sort_by(|a, b| a.name.to_lowercase().cmp(&b.name.to_lowercase()));
     Ok(entries)
 }
 
-fn find_entry_key(name: &str, writable: bool) -> Result<(RegKey, String)> {
-    let hkcr = RegKey::predef(HKEY_CLASSES_ROOT);
-    let flags = if writable {
-        KEY_READ | KEY_WRITE
-    } else {
-        KEY_READ
-    };
-
-    let all_paths: &[&str] = &[
-        r"*\shell",
-        r"*\shellex\ContextMenuHandlers",
-        r"SystemFileAssociations\*\shell",
-        r"SystemFileAssociations\*\shellex\ContextMenuHandlers",
-        r"AllFilesystemObjects\shell",
-        r"AllFilesystemObjects\shellex\ContextMenuHandlers",
-        r"Directory\shell",
-        r"Directory\shellex\ContextMenuHandlers",
-        r"Folder\shell",
-        r"Folder\shellex\ContextMenuHandlers",
-        r"Directory\Background\shell",
-        r"Directory\Background\shellex\ContextMenuHandlers",
-        r"DesktopBackground\shell",
-        r"DesktopBackground\shellex\ContextMenuHandlers",
-    ];
-
-    for parent_path in all_paths {
-        let parent = match hkcr.open_subkey_with_flags(parent_path, flags) {
-            Ok(key) => key,
-            Err(_) => continue,
-        };
-
-        for key_name in parent.enum_keys().filter_map(|k| k.ok()) {
-            if key_name.eq_ignore_ascii_case(name) {
-                let subkey = parent
-                    .open_subkey_with_flags(&key_name, flags)
-                    .with_context(|| format!("Failed to open key '{key_name}' under {parent_path}"))?;
-                return Ok((subkey, format!("{parent_path}\\{key_name}")));
-            }
-        }
-    }
-
-    bail!("Entry '{name}' not found in any context menu registry location");
+/// Extract the last path segment (registry key name) from a registry path.
+fn registry_key_name(registry_path: &str) -> &str {
+    registry_path
+        .strip_prefix("blocked:")
+        .unwrap_or(registry_path)
+        .rsplit('\\')
+        .next()
+        .unwrap_or(registry_path)
 }
 
 pub fn disable_entry(name: &str) -> Result<()> {
-    let (key, path) = find_entry_key(name, true)?;
+    let entries = scan_entries(None)?;
+    let entry = entries
+        .iter()
+        .find(|e| {
+            e.name.eq_ignore_ascii_case(name)
+                || registry_key_name(&e.registry_path).eq_ignore_ascii_case(name)
+        })
+        .with_context(|| format!("Entry '{name}' not found"))?;
 
-    if key.get_value::<String, _>("LegacyDisable").is_ok() {
-        bail!("Entry '{name}' is already disabled");
+    if entry.status == Status::Disabled {
+        bail!("Entry '{}' is already disabled", entry.name);
     }
 
-    key.set_value("LegacyDisable", &"")
-        .with_context(|| format!("Failed to set LegacyDisable on {path}"))?;
-
+    toggle_entry(&entry.registry_path)?;
     Ok(())
 }
 
 pub fn enable_entry(name: &str) -> Result<()> {
-    let (key, path) = find_entry_key(name, true)?;
+    let entries = scan_entries(None)?;
+    let entry = entries
+        .iter()
+        .find(|e| {
+            e.name.eq_ignore_ascii_case(name)
+                || registry_key_name(&e.registry_path).eq_ignore_ascii_case(name)
+        })
+        .with_context(|| format!("Entry '{name}' not found"))?;
 
-    if key.get_value::<String, _>("LegacyDisable").is_err() {
-        bail!("Entry '{name}' is already enabled");
+    if entry.status == Status::Enabled {
+        bail!("Entry '{}' is already enabled", entry.name);
     }
 
-    key.delete_value("LegacyDisable")
-        .with_context(|| format!("Failed to remove LegacyDisable from {path}"))?;
-
+    toggle_entry(&entry.registry_path)?;
     Ok(())
 }
 

@@ -41,6 +41,12 @@ No test suite exists yet. Verification is manual: run the binary on Windows and 
 
 **Async pattern in GUI:** Registry calls are blocking. The UI wraps them in `tokio::task::spawn_blocking()` via `Task::perform()` to avoid freezing.
 
+## Workflow
+
+**Do not commit until the user has tested and confirmed the changes.** After making code changes, build and let the user verify manually. Only commit when the user explicitly asks.
+
+**After completing a plan:** Once all implementation and testing from a plan is finished, automatically stage the changes and prepare the commit (write a commit message), but **always ask the user before actually committing**. Do not wait for the user to ask — proactively prep the git commit and present it for approval.
+
 ## Registry Paths Scanned
 
-Fourteen paths under `HKEY_CLASSES_ROOT` (shell + shellex for each): `*`, `SystemFileAssociations\*`, `AllFilesystemObjects`, `Directory`, `Folder`, `Directory\Background`, `DesktopBackground`.
+Twenty paths under `HKEY_CLASSES_ROOT` (shell + shellex for each): `*`, `SystemFileAssociations\*`, `AllFilesystemObjects`, `Directory`, `Folder`, `Directory\Background`, `DesktopBackground`, `SystemFileAssociations\image`, `SystemFileAssociations\audio`, `SystemFileAssociations\video`. Additionally, per-extension `SystemFileAssociations\.<ext>` and ProgID paths are scanned dynamically.
