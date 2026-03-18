@@ -42,4 +42,4 @@ No test suite exists yet. Verification is manual: run the binary on Windows and 
 
 ## Registry Paths Scanned
 
-Six paths under `HKEY_CLASSES_ROOT`: `*\shell`, `*\shellex\ContextMenuHandlers`, `Directory\shell`, `Directory\shellex\ContextMenuHandlers`, `Directory\Background\shell`, `Directory\Background\shellex\ContextMenuHandlers`.
+Fourteen paths under `HKEY_CLASSES_ROOT` (shell + shellex for each): `*`, `SystemFileAssociations\*`, `AllFilesystemObjects`, `Directory`, `Folder`, `Directory\Background`, `DesktopBackground`.

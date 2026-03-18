@@ -66,6 +66,7 @@ struct ScanTarget {
 }
 
 const SCAN_TARGETS: &[fn() -> ScanTarget] = &[
+    // *  (all file types)
     || ScanTarget {
         path: r"*\shell",
         entry_type: EntryType::Shell,
@@ -76,6 +77,29 @@ const SCAN_TARGETS: &[fn() -> ScanTarget] = &[
         entry_type: EntryType::ShellEx,
         location: Location::Files,
     },
+    // SystemFileAssociations\*  (modern entries like "Edit in Notepad")
+    || ScanTarget {
+        path: r"SystemFileAssociations\*\shell",
+        entry_type: EntryType::Shell,
+        location: Location::Files,
+    },
+    || ScanTarget {
+        path: r"SystemFileAssociations\*\shellex\ContextMenuHandlers",
+        entry_type: EntryType::ShellEx,
+        location: Location::Files,
+    },
+    // AllFilesystemObjects  (applies to files and folders)
+    || ScanTarget {
+        path: r"AllFilesystemObjects\shell",
+        entry_type: EntryType::Shell,
+        location: Location::Files,
+    },
+    || ScanTarget {
+        path: r"AllFilesystemObjects\shellex\ContextMenuHandlers",
+        entry_type: EntryType::ShellEx,
+        location: Location::Files,
+    },
+    // Directory
     || ScanTarget {
         path: r"Directory\shell",
         entry_type: EntryType::Shell,
@@ -86,6 +110,18 @@ const SCAN_TARGETS: &[fn() -> ScanTarget] = &[
         entry_type: EntryType::ShellEx,
         location: Location::Folders,
     },
+    // Folder  (subtly different from Directory — includes virtual folders)
+    || ScanTarget {
+        path: r"Folder\shell",
+        entry_type: EntryType::Shell,
+        location: Location::Folders,
+    },
+    || ScanTarget {
+        path: r"Folder\shellex\ContextMenuHandlers",
+        entry_type: EntryType::ShellEx,
+        location: Location::Folders,
+    },
+    // Directory\Background
     || ScanTarget {
         path: r"Directory\Background\shell",
         entry_type: EntryType::Shell,
@@ -93,6 +129,17 @@ const SCAN_TARGETS: &[fn() -> ScanTarget] = &[
     },
     || ScanTarget {
         path: r"Directory\Background\shellex\ContextMenuHandlers",
+        entry_type: EntryType::ShellEx,
+        location: Location::Background,
+    },
+    // DesktopBackground
+    || ScanTarget {
+        path: r"DesktopBackground\shell",
+        entry_type: EntryType::Shell,
+        location: Location::Background,
+    },
+    || ScanTarget {
+        path: r"DesktopBackground\shellex\ContextMenuHandlers",
         entry_type: EntryType::ShellEx,
         location: Location::Background,
     },
@@ -165,10 +212,18 @@ fn find_entry_key(name: &str, writable: bool) -> Result<(RegKey, String)> {
     let all_paths: &[&str] = &[
         r"*\shell",
         r"*\shellex\ContextMenuHandlers",
+        r"SystemFileAssociations\*\shell",
+        r"SystemFileAssociations\*\shellex\ContextMenuHandlers",
+        r"AllFilesystemObjects\shell",
+        r"AllFilesystemObjects\shellex\ContextMenuHandlers",
         r"Directory\shell",
         r"Directory\shellex\ContextMenuHandlers",
+        r"Folder\shell",
+        r"Folder\shellex\ContextMenuHandlers",
         r"Directory\Background\shell",
         r"Directory\Background\shellex\ContextMenuHandlers",
+        r"DesktopBackground\shell",
+        r"DesktopBackground\shellex\ContextMenuHandlers",
     ];
 
     for parent_path in all_paths {
