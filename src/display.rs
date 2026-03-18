@@ -6,6 +6,8 @@ use crate::registry::MenuEntry;
 struct Row {
     #[tabled(rename = "Name")]
     name: String,
+    #[tabled(rename = "Source")]
+    source: String,
     #[tabled(rename = "Type")]
     entry_type: String,
     #[tabled(rename = "Location")]
@@ -21,6 +23,7 @@ pub fn print_table(entries: &[MenuEntry]) {
         .iter()
         .map(|e| Row {
             name: e.name.clone(),
+            source: truncate(&e.source, 25),
             entry_type: e.entry_type.to_string(),
             location: e.location.to_string(),
             status: e.status.to_string(),

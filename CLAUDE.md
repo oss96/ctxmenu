@@ -31,6 +31,7 @@ No test suite exists yet. Verification is manual: run the binary on Windows and 
 **Module roles:**
 - `main.rs` — clap CLI dispatch, dual-mode entry point
 - `registry.rs` — all Windows Registry logic, core data types (`MenuEntry`, `EntryType`, `Location`, `Status`)
+- `source.rs` — source program resolution (extracts exe paths from commands, resolves CLSIDs to DLLs, reads PE version info via `GetFileVersionInfoW`/`VerQueryValueW`)
 - `ui.rs` — iced GUI (App state, messages, view, async task dispatch)
 - `display.rs` — CLI-only table formatting via `tabled`
 

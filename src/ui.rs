@@ -243,15 +243,15 @@ impl App {
             .iter()
             .enumerate()
             .filter(|(_, e)| {
-                let search_match = self.search_query.is_empty()
-                    || e.name
-                        .to_lowercase()
-                        .contains(&self.search_query.to_lowercase())
+                let q = self.search_query.to_lowercase();
+                let search_match = q.is_empty()
+                    || e.name.to_lowercase().contains(&q)
+                    || e.source.to_lowercase().contains(&q)
                     || e.command
                         .as_deref()
                         .unwrap_or("")
                         .to_lowercase()
-                        .contains(&self.search_query.to_lowercase());
+                        .contains(&q);
                 search_match
             })
             .collect();
@@ -269,9 +269,10 @@ impl App {
         let header = container(
             row![
                 text("Name").width(Length::FillPortion(3)),
+                text("Source").width(Length::FillPortion(2)),
                 text("Type").width(Length::FillPortion(1)),
                 text("Location").width(Length::FillPortion(1)),
-                text("Command / CLSID").width(Length::FillPortion(4)),
+                text("Command / CLSID").width(Length::FillPortion(3)),
                 text("Enabled").width(Length::FillPortion(1)),
             ]
             .spacing(8),
@@ -296,9 +297,10 @@ impl App {
                 container(
                     row![
                         text(&entry.name).width(Length::FillPortion(3)),
+                        text(&entry.source).width(Length::FillPortion(2)),
                         text(entry.entry_type.to_string()).width(Length::FillPortion(1)),
                         text(entry.location.to_string()).width(Length::FillPortion(1)),
-                        text(cmd_text).width(Length::FillPortion(4)).size(12),
+                        text(cmd_text).width(Length::FillPortion(3)).size(12),
                         container(toggle)
                             .width(Length::FillPortion(1))
                             .center_x(Length::Fill),
@@ -380,7 +382,7 @@ fn truncate(s: &str, max: usize) -> String {
 pub fn run() -> Result<()> {
     iced::application(App::title, App::update, App::view)
         .theme(App::theme)
-        .window_size(iced::Size::new(900.0, 600.0))
+        .window_size(iced::Size::new(1000.0, 600.0))
         .run_with(App::new)
         .map_err(|e| anyhow::anyhow!("{e}"))
 }

@@ -1,6 +1,10 @@
+use std::collections::HashMap;
+
 use anyhow::{bail, Context, Result};
 use winreg::enums::*;
 use winreg::RegKey;
+
+use crate::source;
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct MenuEntry {
@@ -10,6 +14,7 @@ pub struct MenuEntry {
     pub location: Location,
     pub status: Status,
     pub command: Option<String>,
+    pub source: String,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -197,6 +202,7 @@ fn scan_modern_entries(filter: Option<&Location>, entries: &mut Vec<MenuEntry>) 
             location: location.clone(),
             status: if blocked { Status::Disabled } else { Status::Enabled },
             command: Some(clsid.to_string()),
+            source: "Windows".to_string(),
         });
     }
 }
@@ -204,6 +210,7 @@ fn scan_modern_entries(filter: Option<&Location>, entries: &mut Vec<MenuEntry>) 
 pub fn scan_entries(filter: Option<&Location>) -> Result<Vec<MenuEntry>> {
     let hkcr = RegKey::predef(HKEY_CLASSES_ROOT);
     let mut entries = Vec::new();
+    let mut source_cache: HashMap<String, String> = HashMap::new();
 
     for target_fn in SCAN_TARGETS {
         let target = target_fn();
@@ -237,6 +244,13 @@ pub fn scan_entries(filter: Option<&Location>) -> Result<Vec<MenuEntry>> {
                 }
             };
 
+            let source = source::resolve_source(
+                &target.entry_type,
+                &name,
+                &command,
+                &mut source_cache,
+            );
+
             entries.push(MenuEntry {
                 name,
                 registry_path,
@@ -248,6 +262,7 @@ pub fn scan_entries(filter: Option<&Location>) -> Result<Vec<MenuEntry>> {
                     Status::Enabled
                 },
                 command,
+                source,
             });
         }
     }

@@ -2,6 +2,7 @@
 
 mod display;
 mod registry;
+mod source;
 mod ui;
 
 use anyhow::Result;
