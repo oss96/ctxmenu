@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use anyhow::{bail, Context, Result};
 use winreg::enums::*;
@@ -207,10 +207,124 @@ fn scan_modern_entries(filter: Option<&Location>, entries: &mut Vec<MenuEntry>) 
     }
 }
 
+/// Scan ProgID and file-extension-specific context menu entries.
+/// These capture entries like "Edit in Notepad" (under txtfile\shell\edit)
+/// or app-specific entries registered under their ProgID.
+fn scan_progid_entries(
+    filter: Option<&Location>,
+    entries: &mut Vec<MenuEntry>,
+    seen: &mut HashSet<String>,
+    source_cache: &mut HashMap<String, String>,
+) {
+    // ProgID entries only apply to files
+    if let Some(f) = filter {
+        if *f != Location::Files {
+            return;
+        }
+    }
+
+    let hkcr = RegKey::predef(HKEY_CLASSES_ROOT);
+
+    // Collect ProgIDs from file extensions
+    let mut progids: HashSet<String> = HashSet::new();
+    if let Ok(hkcr_key) = hkcr.open_subkey_with_flags("", KEY_READ) {
+        for ext_name in hkcr_key.enum_keys().filter_map(|k| k.ok()) {
+            if !ext_name.starts_with('.') {
+                continue;
+            }
+            // Read the default value to get the ProgID
+            if let Ok(ext_key) = hkcr.open_subkey_with_flags(&ext_name, KEY_READ) {
+                if let Ok(progid) = ext_key.get_value::<String, _>("") {
+                    let progid = progid.trim().to_string();
+                    if !progid.is_empty() {
+                        progids.insert(progid);
+                    }
+                }
+            }
+        }
+    }
+
+    // Also add "Applications\*" entries
+    if let Ok(apps_key) = hkcr.open_subkey_with_flags("Applications", KEY_READ) {
+        for app_name in apps_key.enum_keys().filter_map(|k| k.ok()) {
+            progids.insert(format!("Applications\\{app_name}"));
+        }
+    }
+
+    // Scan each ProgID's shell and shellex\ContextMenuHandlers
+    for progid in &progids {
+        for (suffix, entry_type) in [
+            ("shell", EntryType::Shell),
+            ("shellex\\ContextMenuHandlers", EntryType::ShellEx),
+        ] {
+            let path = format!("{}\\{}", progid, suffix);
+            let parent = match hkcr.open_subkey_with_flags(&path, KEY_READ) {
+                Ok(key) => key,
+                Err(_) => continue,
+            };
+
+            for name in parent.enum_keys().filter_map(|k| k.ok()) {
+                // Dedup by lowercase name + entry type
+                let dedup_key = format!("{}:{}", name.to_lowercase(), entry_type);
+                if seen.contains(&dedup_key) {
+                    continue;
+                }
+
+                let subkey = match parent.open_subkey_with_flags(&name, KEY_READ) {
+                    Ok(key) => key,
+                    Err(_) => continue,
+                };
+
+                let registry_path = format!("{}\\{}", path, name);
+                let disabled = is_disabled(&registry_path);
+
+                let command = match entry_type {
+                    EntryType::Shell => subkey
+                        .open_subkey_with_flags("command", KEY_READ)
+                        .ok()
+                        .and_then(|cmd_key| cmd_key.get_value::<String, _>("").ok())
+                        .or_else(|| {
+                            subkey
+                                .get_value::<String, _>("DelegateExecute")
+                                .ok()
+                                .map(|clsid| format!("delegate:{clsid}"))
+                        }),
+                    EntryType::ShellEx | EntryType::Modern => {
+                        subkey.get_value::<String, _>("").ok()
+                    }
+                };
+
+                let source_name = source::resolve_source(
+                    &entry_type,
+                    &name,
+                    &command,
+                    source_cache,
+                );
+
+                seen.insert(dedup_key);
+                entries.push(MenuEntry {
+                    name,
+                    registry_path,
+                    entry_type: entry_type.clone(),
+                    location: Location::Files,
+                    status: if disabled {
+                        Status::Disabled
+                    } else {
+                        Status::Enabled
+                    },
+                    command,
+                    source: source_name,
+                });
+            }
+        }
+    }
+}
+
 pub fn scan_entries(filter: Option<&Location>) -> Result<Vec<MenuEntry>> {
     let hkcr = RegKey::predef(HKEY_CLASSES_ROOT);
     let mut entries = Vec::new();
     let mut source_cache: HashMap<String, String> = HashMap::new();
+    let mut seen: HashSet<String> = HashSet::new();
 
     for target_fn in SCAN_TARGETS {
         let target = target_fn();
@@ -238,7 +352,14 @@ pub fn scan_entries(filter: Option<&Location>) -> Result<Vec<MenuEntry>> {
                 EntryType::Shell => subkey
                     .open_subkey_with_flags("command", KEY_READ)
                     .ok()
-                    .and_then(|cmd_key| cmd_key.get_value::<String, _>("").ok()),
+                    .and_then(|cmd_key| cmd_key.get_value::<String, _>("").ok())
+                    .or_else(|| {
+                        // Fallback: some shell verbs use DelegateExecute instead of command
+                        subkey
+                            .get_value::<String, _>("DelegateExecute")
+                            .ok()
+                            .map(|clsid| format!("delegate:{clsid}"))
+                    }),
                 EntryType::ShellEx | EntryType::Modern => {
                     subkey.get_value::<String, _>("").ok()
                 }
@@ -250,6 +371,10 @@ pub fn scan_entries(filter: Option<&Location>) -> Result<Vec<MenuEntry>> {
                 &command,
                 &mut source_cache,
             );
+
+            // Track for deduplication with ProgID scan
+            let dedup_key = format!("{}:{}", name.to_lowercase(), target.entry_type);
+            seen.insert(dedup_key);
 
             entries.push(MenuEntry {
                 name,
@@ -266,6 +391,9 @@ pub fn scan_entries(filter: Option<&Location>) -> Result<Vec<MenuEntry>> {
             });
         }
     }
+
+    // Scan ProgID and file-extension-specific entries
+    scan_progid_entries(filter, &mut entries, &mut seen, &mut source_cache);
 
     // Scan Windows 11 modern context menu entries
     scan_modern_entries(filter, &mut entries);

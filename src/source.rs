@@ -23,6 +23,21 @@ pub fn resolve_source(
                 // Shell entries with no command are built-in Windows shell verbs
                 return "Windows".to_string();
             };
+            // Handle DelegateExecute entries (delegate:{CLSID})
+            if let Some(clsid) = cmd.strip_prefix("delegate:") {
+                if let Some(dll_path) = resolve_clsid_to_path(clsid) {
+                    let key = dll_path.to_lowercase();
+                    if let Some(cached) = cache.get(&key) {
+                        return cached.clone();
+                    }
+                    let name = get_product_name(&dll_path)
+                        .unwrap_or_else(|| clsid_display_name(clsid)
+                            .unwrap_or_else(|| filename_stem(&dll_path)));
+                    cache.insert(key, name.clone());
+                    return name;
+                }
+                return clsid_display_name(clsid).unwrap_or_else(|| "Windows".to_string());
+            }
             if let Some(exe_path) = extract_exe_path(cmd) {
                 if let Some(cached) = cache.get(&exe_path.to_lowercase()) {
                     return cached.clone();
