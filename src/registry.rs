@@ -16,6 +16,7 @@ pub struct MenuEntry {
 pub enum EntryType {
     Shell,
     ShellEx,
+    Modern,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -36,6 +37,7 @@ impl std::fmt::Display for EntryType {
         match self {
             EntryType::Shell => write!(f, "shell"),
             EntryType::ShellEx => write!(f, "shellex"),
+            EntryType::Modern => write!(f, "modern"),
         }
     }
 }
@@ -145,6 +147,60 @@ const SCAN_TARGETS: &[fn() -> ScanTarget] = &[
     },
 ];
 
+// Windows 11 modern context menu entries (IExplorerCommand / PackagedCom).
+// These are disabled via Shell Extensions\Blocked, not LegacyDisable.
+// The registry_path for these entries is stored as "blocked:{CLSID}".
+const MODERN_ENTRIES: &[(&str, &str, Location)] = &[
+    ("Edit with Notepad", "{CA6CC9F1-867A-481E-951E-A28C5E4F01EA}", Location::Files),
+    ("Edit with Paint", "{2430F218-B743-4FD6-97BF-5C76541B4AE9}", Location::Files),
+    ("Edit with Clipchamp", "{8BCF599D-B158-450F-B4C2-430932F2AF2F}", Location::Files),
+    ("Open in Terminal", "{9F156763-7844-4DC4-B2B1-901F640F5155}", Location::Background),
+    ("Open in Terminal Preview", "{02DB545A-3E20-46DE-83A5-1329B1E88B6B}", Location::Background),
+    ("Copy as path", "{f3d06e7c-1e45-4a26-847e-f9fcdee59be0}", Location::Files),
+    ("Ask Copilot", "{CB3B0003-8088-4EDE-8769-8B354AB2FF8C}", Location::Files),
+    ("Photos", "{CD349BB6-A2BC-47ED-874F-7185ABA53BD4}", Location::Files),
+    ("Photos (Share)", "{BFE0E2A4-C70C-4AD7-AC3D-10D1ECEBB5B4}", Location::Files),
+];
+
+const BLOCKED_KEY_PATH: &str =
+    r"Software\Microsoft\Windows\CurrentVersion\Shell Extensions\Blocked";
+
+fn is_modern_blocked(clsid: &str) -> bool {
+    let hkcu = RegKey::predef(HKEY_CURRENT_USER);
+    if let Ok(key) = hkcu.open_subkey_with_flags(BLOCKED_KEY_PATH, KEY_READ) {
+        return key.get_value::<String, _>(clsid).is_ok();
+    }
+    false
+}
+
+fn scan_modern_entries(filter: Option<&Location>, entries: &mut Vec<MenuEntry>) {
+    // Only include entries whose PackagedCom CLSID actually exists on this system
+    let hkcr = RegKey::predef(HKEY_CLASSES_ROOT);
+    for &(name, clsid, ref location) in MODERN_ENTRIES {
+        if let Some(f) = filter {
+            if *location != *f {
+                continue;
+            }
+        }
+
+        // Check if this handler is actually registered on this machine
+        let class_path = format!(r"PackagedCom\ClassIndex\{clsid}");
+        if hkcr.open_subkey_with_flags(&class_path, KEY_READ).is_err() {
+            continue;
+        }
+
+        let blocked = is_modern_blocked(clsid);
+        entries.push(MenuEntry {
+            name: name.to_string(),
+            registry_path: format!("blocked:{clsid}"),
+            entry_type: EntryType::Modern,
+            location: location.clone(),
+            status: if blocked { Status::Disabled } else { Status::Enabled },
+            command: Some(clsid.to_string()),
+        });
+    }
+}
+
 pub fn scan_entries(filter: Option<&Location>) -> Result<Vec<MenuEntry>> {
     let hkcr = RegKey::predef(HKEY_CLASSES_ROOT);
     let mut entries = Vec::new();
@@ -176,16 +232,15 @@ pub fn scan_entries(filter: Option<&Location>) -> Result<Vec<MenuEntry>> {
                     .open_subkey_with_flags("command", KEY_READ)
                     .ok()
                     .and_then(|cmd_key| cmd_key.get_value::<String, _>("").ok()),
-                EntryType::ShellEx => subkey.get_value::<String, _>("").ok(),
+                EntryType::ShellEx | EntryType::Modern => {
+                    subkey.get_value::<String, _>("").ok()
+                }
             };
 
             entries.push(MenuEntry {
                 name,
                 registry_path,
-                entry_type: match target.entry_type {
-                    EntryType::Shell => EntryType::Shell,
-                    EntryType::ShellEx => EntryType::ShellEx,
-                },
+                entry_type: target.entry_type.clone(),
                 location: target.location.clone(),
                 status: if disabled {
                     Status::Disabled
@@ -196,6 +251,9 @@ pub fn scan_entries(filter: Option<&Location>) -> Result<Vec<MenuEntry>> {
             });
         }
     }
+
+    // Scan Windows 11 modern context menu entries
+    scan_modern_entries(filter, &mut entries);
 
     entries.sort_by(|a, b| a.name.to_lowercase().cmp(&b.name.to_lowercase()));
     Ok(entries)
@@ -327,16 +385,78 @@ fn is_disabled(registry_path: &str) -> bool {
 }
 
 pub fn toggle_entry(registry_path: &str) -> Result<Status> {
+    // Modern entries use "blocked:{CLSID}" as their registry_path
+    if let Some(clsid) = registry_path.strip_prefix("blocked:") {
+        return toggle_modern_entry(clsid);
+    }
+
     let currently_disabled = is_disabled(registry_path);
-    let key = open_writable(registry_path)?;
 
     if currently_disabled {
-        key.delete_value("LegacyDisable")
-            .with_context(|| format!("Failed to remove LegacyDisable from {registry_path}"))?;
+        remove_legacy_disable(registry_path)?;
         Ok(Status::Enabled)
     } else {
+        let key = open_writable(registry_path)?;
         key.set_value("LegacyDisable", &"")
             .with_context(|| format!("Failed to set LegacyDisable on {registry_path}"))?;
         Ok(Status::Disabled)
     }
+}
+
+fn toggle_modern_entry(clsid: &str) -> Result<Status> {
+    let hkcu = RegKey::predef(HKEY_CURRENT_USER);
+    let (blocked_key, _) = hkcu
+        .create_subkey_with_flags(BLOCKED_KEY_PATH, KEY_READ | KEY_WRITE)
+        .with_context(|| format!("Failed to open {BLOCKED_KEY_PATH}"))?;
+
+    if is_modern_blocked(clsid) {
+        blocked_key
+            .delete_value(clsid)
+            .with_context(|| format!("Failed to unblock {clsid}"))?;
+        Ok(Status::Enabled)
+    } else {
+        blocked_key
+            .set_value(clsid, &"")
+            .with_context(|| format!("Failed to block {clsid}"))?;
+        Ok(Status::Disabled)
+    }
+}
+
+/// Remove LegacyDisable from wherever it exists.
+/// Tries HKCR (direct), then HKCU override. If the value only exists in
+/// HKLM (system-protected), it cannot be removed without TrustedInstaller.
+fn remove_legacy_disable(registry_path: &str) -> Result<()> {
+    let hkcr = RegKey::predef(HKEY_CLASSES_ROOT);
+    let hkcu = RegKey::predef(HKEY_CURRENT_USER);
+    let hkcu_path = format!(r"SOFTWARE\Classes\{registry_path}");
+
+    let mut removed = false;
+
+    // Try removing from HKCR directly (works if key is user/admin-writable)
+    if let Ok(key) = hkcr.open_subkey_with_flags(registry_path, KEY_READ | KEY_WRITE) {
+        if key.delete_value("LegacyDisable").is_ok() {
+            removed = true;
+        }
+    }
+
+    // Try removing from HKCU override
+    if let Ok(key) = hkcu.open_subkey_with_flags(&hkcu_path, KEY_READ | KEY_WRITE) {
+        if key.delete_value("LegacyDisable").is_ok() {
+            removed = true;
+        }
+    }
+
+    if removed {
+        return Ok(());
+    }
+
+    // Value exists but is in HKLM and protected
+    if is_disabled(registry_path) {
+        bail!(
+            "'{registry_path}' is disabled by Windows (system-protected). \
+             Cannot re-enable without TrustedInstaller permissions."
+        );
+    }
+
+    Ok(())
 }
