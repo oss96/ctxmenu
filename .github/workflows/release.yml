@@ -1,8 +1,11 @@
-name: Build
+name: Build & Release
 
 on:
   push:
     branches: [main]
+
+permissions:
+  contents: write
 
 env:
   FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
@@ -28,8 +31,15 @@ jobs:
       - name: Build release
         run: cargo build --release
 
-      - name: Upload binary
-        uses: actions/upload-artifact@v4
-        with:
-          name: ctxmenu
-          path: target/release/ctxmenu.exe
+      - name: Update release
+        shell: bash
+        run: |
+          gh release delete latest --yes --cleanup-tag 2>/dev/null || true
+          git tag -f latest
+          git push -f origin latest
+          gh release create latest target/release/ctxmenu.exe \
+            --title "Latest Build" \
+            --notes "Automated build from [\`$(git rev-parse --short HEAD)\`](https://github.com/${{ github.repository }}/commit/${{ github.sha }})" \
+            --latest
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
